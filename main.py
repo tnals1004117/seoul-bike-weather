@@ -1,11 +1,15 @@
-
 import streamlit as st
 import pandas as pd
-from ucimlrepo import fetch_ucirepo
+import plotly.express as px
+from sklearn.linear_model import LinearRegression
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-# -------------------------
-# 페이지 설정
-# -------------------------
+
+# --------------------------------------------------
+# 기본 화면 설정
+# --------------------------------------------------
 st.set_page_config(
     page_title="따릉이 날씨 예측 연구소",
     page_icon="🚲",
@@ -13,138 +17,80 @@ st.set_page_config(
 )
 
 st.title("🚲 따릉이 날씨 예측 연구소")
-st.caption("날씨에 따른 서울시 공공자전거 대여량 분석 및 예측")
+st.caption("날씨에 따라 시간별 따릉이 대여량이 어떻게 달라지는지 살펴보고 예측해 봅니다.")
 
-st.divider()
 
-# -------------------------
+# --------------------------------------------------
 # 데이터 불러오기
-# -------------------------
-@st.cache_data(ttl=3600)
+# --------------------------------------------------
+@st.cache_data(show_spinner="UCI에서 따릉이 데이터를 불러오는 중입니다...")
 def load_data():
-    bike = fetch_ucirepo(id=560)
+    from ucimlrepo import fetch_ucirepo
 
-    features = bike.data.features
-    targets = bike.data.targets
+    dataset = fetch_ucirepo(id=560)
+    features = dataset.data.features
+    targets = dataset.data.targets
 
-    df = pd.concat([features, targets], axis=1)
+    # UCI 데이터는 입력 변수와 별도 target 표로 나뉘어 제공될 수 있으므로 합칩니다.
+    data = pd.concat([features, targets], axis=1)
+    data = data.loc[:, ~data.columns.duplicated()].copy()
 
-    return df
+    return data
 
-st.header("1. 데이터 수집")
 
-st.write("""
-UCI Machine Learning Repository에서 제공하는
-서울시 공공자전거 대여량 데이터를 불러옵니다.
-""")
+def normalize_name(name):
+    """열 이름에서 공백과 기호를 없애 열 이름을 비교하기 쉽게 만듭니다."""
+    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
 
-with st.spinner("데이터를 불러오는 중입니다..."):
-    try:
-        df = load_data()
-        st.success("데이터 수집에 성공했습니다!")
 
-    except Exception as e:
-        st.error("데이터를 불러오지 못했습니다.")
-        st.exception(e)
+def find_column(data, possible_names):
+    """실제 데이터의 열 이름이 조금 달라도 해당 열을 찾습니다."""
+    normalized_columns = {normalize_name(col): col for col in data.columns}
+
+    for name in possible_names:
+        key = normalize_name(name)
+        if key in normalized_columns:
+            return normalized_columns[key]
+
+    for col in data.columns:
+        normalized_col = normalize_name(col)
+        for name in possible_names:
+            key = normalize_name(name)
+            if normalized_col.startswith(key):
+                return col
+    return None
+
+
+try:
+    raw_data = load_data()
+    if raw_data.empty:
+        st.error("데이터가 비어 있습니다. 잠시 후 다시 실행해 주세요.")
         st.stop()
+except Exception as error:
+    st.error("데이터를 불러오지 못했습니다. 인터넷 연결이나 데이터 출처를 확인해 주세요.")
+    st.caption(f"오류 내용: {error}")
+    st.stop()
 
-# -------------------------
-# 데이터 기본 정보
-# -------------------------
-st.header("2. 데이터 기본 정보")
 
-col1, col2, col3 = st.columns(3)
+# 실제 데이터 열 이름 찾기
+columns = {
+    "date": find_column(raw_data, ["Date"]),
+    "target": find_column(raw_data, ["Rented Bike Count", "Rented Bike count", "Rented"]),
+    "hour": find_column(raw_data, ["Hour"]),
+    "temperature": find_column(raw_data, ["Temperature"]),
+    "humidity": find_column(raw_data, ["Humidity"]),
+    "wind": find_column(raw_data, ["Wind speed", "Windspeed", "Wind"]),
+    "rainfall": find_column(raw_data, ["Rainfall"]),
+    "snowfall": find_column(raw_data, ["Snowfall"]),
+    "solar": find_column(raw_data, ["Solar Radiation", "Solar"]),
+    "season": find_column(raw_data, ["Seasons", "Season"]),
+    "functioning": find_column(raw_data, ["Functioning Day", "Functioning_Day"]),
+}
 
-with col1:
-    st.metric("전체 데이터 수", f"{len(df):,}개")
-
-with col2:
-    st.metric("전체 열 개수", f"{len(df.columns)}개")
-
-with col3:
-    st.metric(
-        "전체 결측치",
-        f"{df.isnull().sum().sum():,}개"
-    )
-
-st.divider()
-
-# -------------------------
-# 데이터 열 확인
-# -------------------------
-st.header("3. 데이터 열 확인")
-
-column_info = pd.DataFrame({
-    "열 이름": df.columns,
-    "데이터 종류": [
-        str(df[col].dtype) for col in df.columns
-    ],
-    "결측치 개수": [
-        df[col].isnull().sum() for col in df.columns
-    ]
-})
-
-st.dataframe(
-    column_info,
-    use_container_width=True,
-    hide_index=True
-)
-
-# -------------------------
-# 데이터 미리보기
-# -------------------------
-st.header("4. 데이터 미리보기")
-
-st.write("수집한 데이터의 처음 10개 행입니다.")
-
-st.dataframe(
-    df.head(10),
-    use_container_width=True,
-    hide_index=True
-)
-
-# -------------------------
-# 결측치 확인
-# -------------------------
-st.header("5. 결측치 확인")
-
-missing = pd.DataFrame({
-    "열 이름": df.columns,
-    "결측치 개수": [
-        df[col].isnull().sum() for col in df.columns
-    ]
-})
-
-st.dataframe(
-    missing,
-    use_container_width=True,
-    hide_index=True
-)
-
-if df.isnull().sum().sum() == 0:
-    st.success("결측치가 없습니다.")
-else:
-    st.warning("결측치가 있는 열을 확인해야 합니다.")
-
-# -------------------------
-# CSV 다운로드
-# -------------------------
-st.divider()
-
-st.header("6. 데이터 다운로드")
-
-csv = df.to_csv(
-    index=False
-).encode("utf-8-sig")
-
-st.download_button(
-    label="📥 원본 데이터 CSV 다운로드",
-    data=csv,
-    file_name="bike_weather_raw.csv",
-    mime="text/csv"
-)
-
-st.info("""
-다음 단계에서는 날짜, 시간, 날씨 등의 데이터를 분석하고
-날씨와 따릉이 대여량 사이의 관계를 그래프로 살펴봅니다.
-""")
+required_keys = ["target", "temperature", "humidity", "wind", "rainfall", "snowfall", "solar"]
+missing_keys = [key for key in required_keys if columns[key] is None]
+if missing_keys:
+    st.error("데이터에서 필요한 열을 찾지 못했습니다.")
+    st.write("찾지 못한 항목:", ", ".join(missing_keys))
+    st.write("실제 데이터 열 이름:", list(raw_data.columns))
+    st.stop()
